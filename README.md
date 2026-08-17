@@ -185,14 +185,16 @@ cmake --build . -j
 
 ---
 
-## 💼 Interview & Resume Highlights (For Qualcomm, Apple & NVIDIA)
+## 📈 Key Results Summary
 
-### High-Impact Resume Bullets:
-> **On-Device LLM Inference Optimization & Micro-Kernels (ARM64, C++17)**
-> - Engineered an optimized SwiGLU / LLaMA-3 feed-forward inference engine in bare-metal C++17, achieving **$190.5\times$ speedup** and **$41.7\text{ GFLOP/s}$** on Snapdragon 8 Gen 2 via INT8 SIMD vectorization (`vdotq_s32`) with **$<0.6\%$ NRMSE**.
-> - Eliminated **$>80\%$ of intermediate activation DRAM traffic** during autoregressive token generation by fusing Gate/Up projections, polynomial SiLU, and Hadamard products directly within ARM vector registers.
-> - Mitigated asymmetric CPU synchronization bottlenecks across heterogeneous big.LITTLE / tri-cluster architectures (Cortex-X3 / A715 / A510), reducing layer latency by **$2.08\times$** through custom CPU cluster pinning and dynamic work-stealing.
-> - Validated numerical accuracy and throughput ceilings against vendor BLAS references (**Apple Accelerate `cblas_sgemm`** and **OpenBLAS**) across Apple Silicon (M1) and Qualcomm Snapdragon.
+| Metric | Snapdragon 8 Gen 2 | Apple M1 |
+| :--- | :---: | :---: |
+| **Peak GEMM Speedup (INT8 vs Naive)** | $190.5\times$ | $72.7\times$ |
+| **INT8 Throughput** | 41.74 GFLOP/s | 39.74 GFLOP/s |
+| **Fused FFN Speedup (vs Naive)** | $9.76\times$ | $16.47\times$ |
+| **Fusion Latency Reduction (vs Unfused)** | $1.43\times$ | $1.48\times$ |
+| **Cluster Affinity Gain (vs Naive Static)** | $2.08\times$ | $1.45\times$ |
+| **INT8 Quantization Error (NRMSE)** | $<0.6\%$ | $<0.6\%$ |
 
 ---
 
