@@ -1,13 +1,14 @@
-# ⚡ VectorFFN: High-Performance On-Device LLM Inference Engine (ARM64)
-### Bare-Metal C++17 Fused SwiGLU Micro-Kernels for LLaMA-3, Mistral & Gemma Edge Inference
+# ⚡ VectorFFN: High-Performance On-Device LLM Inference Engine (ARM64 SIMD)
+### Bare-Metal C++17 Fused SwiGLU SIMD Micro-Kernels for LLaMA-3, Mistral & Gemma Edge Inference
 
 [![C++17](https://img.shields.io/badge/Language-C%2B%2B17-blue.svg)](https://en.cppreference.com/w/cpp/17)
-[![ISA](https://img.shields.io/badge/ISA-ARMv8.5--A%20%7C%20ARMv9%20%7C%20NEON%20%7C%20dotprod-green.svg)](#)
+[![SIMD](https://img.shields.io/badge/SIMD-ARM%20NEON%20%7C%20dotprod%20%7C%208--Wide-red.svg)](#)
+[![ISA](https://img.shields.io/badge/ISA-ARMv8.5--A%20%7C%20ARMv9%20%7C%20AArch64-green.svg)](#)
 [![Multi-Threading](https://img.shields.io/badge/Threading-OpenMP-orange.svg)](#)
 [![Platforms](https://img.shields.io/badge/Hardware-Qualcomm%20Snapdragon%20%7C%20Apple%20Silicon%20%7C%20AWS%20Graviton-purple.svg)](#)
 [![Accuracy](https://img.shields.io/badge/Precision-INT8%20(NRMSE%20%3C%200.6%25)-brightgreen.svg)](#)
 
-**VectorFFN** is a hardware-conscious, bare-metal C++17 inference engine engineered to accelerate the primary compute and memory bottleneck in modern Large Language Models (LLMs)—the **SwiGLU Feed-Forward Network (FFN)** block found in **LLaMA-3, Mistral, Gemma, and DeepSeek**:
+**VectorFFN** is a hardware-conscious, bare-metal C++17 SIMD inference engine engineered to accelerate the primary compute and memory bottleneck in modern Large Language Models (LLMs)—the **SwiGLU Feed-Forward Network (FFN)** block found in **LLaMA-3, Mistral, Gemma, and DeepSeek**:
 $$\text{FFN}(x) = \left(\text{SiLU}(x \cdot W_{\text{gate}}) \odot (x \cdot W_{\text{up}})\right) \cdot W_{\text{down}}$$
 
 In modern autoregressive decoder models, the FFN layers represent **$\sim 65\%$ of total model parameters** and dominate per-token generation latency (the autoregressive *decode phase*). VectorFFN implements a hardware-software co-designed inference pipeline that eliminates intermediate activation memory traffic, achieves **up to $190\times$ speedup** over unvectorized baselines, and cuts mobile DRAM power consumption on edge ARM devices.
