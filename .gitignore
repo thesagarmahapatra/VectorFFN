@@ -1,0 +1,24 @@
+# Build directories
+build/
+build-*/
+bin/
+out/
+*.out
+*.log
+out.txt
+
+# Object and executable files
+*.o
+*.obj
+*.so
+*.dylib
+*.a
+*.exe
+ffn_bench*
+
+# IDE & Editor files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
