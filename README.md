@@ -6,9 +6,14 @@ Bare-metal C++17 implementation of fused SwiGLU micro-kernels targeting the domi
 
 $$\text{FFN}(x) = \left(\text{SiLU}(x \cdot W_{\text{gate}}) \odot (x \cdot W_{\text{up}})\right) \cdot W_{\text{down}}$$
 
-[![C++17](https://img.shields.io/badge/C%2B%2B17-blue.svg)](https://en.cppreference.com/w/cpp/17)
-[![SIMD](https://img.shields.io/badge/SIMD-ARM%20NEON%20%7C%20dotprod-red.svg)](#)
-[![Platforms](https://img.shields.io/badge/Qualcomm%20Snapdragon%20%7C%20Apple%20Silicon%20%7C%20AWS%20Graviton-purple.svg)](#)
+[![C++17](https://img.shields.io/badge/Language-C%2B%2B17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![SIMD](https://img.shields.io/badge/SIMD-ARM%20NEON%20%7C%20dotprod%20%7C%208--Wide-red.svg)](#)
+[![ISA](https://img.shields.io/badge/ISA-AArch64%20%7C%20ARMv8.5--A%20%7C%20ARMv9-green.svg)](#)
+[![Quantization](https://img.shields.io/badge/Quantization-INT8%20(vdotq__s32)-yellow.svg)](#)
+[![Multi-Threading](https://img.shields.io/badge/Threading-OpenMP-orange.svg)](#)
+[![Platforms](https://img.shields.io/badge/Platforms-Snapdragon%20%7C%20Apple%20Silicon%20%7C%20Graviton-purple.svg)](#)
+[![Target Models](https://img.shields.io/badge/Models-LLaMA--3%20%7C%20Mistral%20%7C%20Gemma-informational.svg)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-lightgrey.svg)](LICENSE)
 
 ---
 
