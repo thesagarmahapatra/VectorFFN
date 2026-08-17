@@ -1,182 +1,110 @@
-# ⚡ VectorFFN: High-Performance On-Device LLM Inference Engine (ARM64 SIMD)
-### Bare-Metal C++17 Fused SwiGLU SIMD Micro-Kernels for LLaMA-3, Mistral & Gemma Edge Inference
+# ⚡ VectorFFN
 
-[![C++17](https://img.shields.io/badge/Language-C%2B%2B17-blue.svg)](https://en.cppreference.com/w/cpp/17)
-[![SIMD](https://img.shields.io/badge/SIMD-ARM%20NEON%20%7C%20dotprod%20%7C%208--Wide-red.svg)](#)
-[![ISA](https://img.shields.io/badge/ISA-ARMv8.5--A%20%7C%20ARMv9%20%7C%20AArch64-green.svg)](#)
-[![Multi-Threading](https://img.shields.io/badge/Threading-OpenMP-orange.svg)](#)
-[![Platforms](https://img.shields.io/badge/Hardware-Qualcomm%20Snapdragon%20%7C%20Apple%20Silicon%20%7C%20AWS%20Graviton-purple.svg)](#)
-[![Accuracy](https://img.shields.io/badge/Precision-INT8%20(NRMSE%20%3C%200.6%25)-brightgreen.svg)](#)
+**High-performance on-device LLM inference engine for ARM64 SIMD architectures.**
 
-**VectorFFN** is a hardware-conscious, bare-metal C++17 SIMD inference engine engineered to accelerate the primary compute and memory bottleneck in modern Large Language Models (LLMs)—the **SwiGLU Feed-Forward Network (FFN)** block found in **LLaMA-3, Mistral, Gemma, and DeepSeek**:
+Bare-metal C++17 implementation of fused SwiGLU micro-kernels targeting the dominant compute bottleneck in modern transformer models (LLaMA-3, Mistral, Gemma, DeepSeek):
+
 $$\text{FFN}(x) = \left(\text{SiLU}(x \cdot W_{\text{gate}}) \odot (x \cdot W_{\text{up}})\right) \cdot W_{\text{down}}$$
 
-In modern autoregressive decoder models, the FFN layers represent **$\sim 65\%$ of total model parameters** and dominate per-token generation latency (the autoregressive *decode phase*). VectorFFN implements a hardware-software co-designed inference pipeline that eliminates intermediate activation memory traffic, achieves **up to $190\times$ speedup** over unvectorized baselines, and cuts mobile DRAM power consumption on edge ARM devices.
+[![C++17](https://img.shields.io/badge/C%2B%2B17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![SIMD](https://img.shields.io/badge/SIMD-ARM%20NEON%20%7C%20dotprod-red.svg)](#)
+[![Platforms](https://img.shields.io/badge/Qualcomm%20Snapdragon%20%7C%20Apple%20Silicon%20%7C%20AWS%20Graviton-purple.svg)](#)
 
 ---
 
-## 🧠 Why Edge LLM Inference is a Systems Problem
+## Key Ideas
 
-During autoregressive token generation (Batch Size = 1 or low sequence lengths), inference is strictly **memory-bandwidth bound**:
+In modern LLMs, the FFN layers account for ~65% of model parameters and dominate per-token latency. Standard inference frameworks dispatch Gate, Up, and Down projections as separate GEMM calls, writing large intermediate activation matrices to DRAM between each step.
 
-```
-Standard Unfused LLM Pipeline (High DRAM Traffic & Thermal Penalties):
-Input [seq, d_model] 
-  ├──> Gate Projection GEMM ──> Write to DRAM [seq, d_ff] ──┐
-  ├──> Up Projection GEMM   ──> Write to DRAM [seq, d_ff] ──┼─> Read DRAM ──> SiLU & Hadamard (⊙) ──> Write to DRAM [seq, d_ff] ──> Read DRAM ──> Down Projection GEMM ──> Output
-                                                            │   (Massive memory bus thrashing, LPDDR5 latency & thermal throttling)
-                                                            └────────────────────────────────────────────────────────────────────────┘
-
-VectorFFN In-Register Fused Pipeline (Zero Intermediate DRAM Roundtrips):
-Input [seq, d_model] 
-  └──> In-Register Fused Kernel ──> [Gate_4, Up_4 in NEON Regs] ──> [In-Register SiLU + ⊙] ──> Single Direct Down-Proj Accumulation ──> Output
-       (Over 80% activation memory traffic eliminated; stays entirely on-chip within ARM 128-bit vector register files)
-```
+VectorFFN eliminates this overhead by **fusing the entire SwiGLU pipeline directly within ARM NEON vector registers** — Gate projection, Up projection, polynomial SiLU, and Hadamard product all execute in-register with zero intermediate DRAM roundtrips.
 
 ---
 
-## 🚀 Optimization Stack & Kernel Architecture
+## Optimization Levels
 
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ 1. Memory Stream Alignment (B^T Offline Weight Transposition)                          │
-│    Converts stride-N column accesses to contiguous unit-stride SIMD streams (vld1q_f32)│
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ 2. 3D Cache Blocking (MT x NT x KT)                                                    │
-│    Partitions working sets to fit L1D/L2 caches; single write-back to main memory      │
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ 3. 8-Wide ARM NEON Vector Microkernel (microkernel_8x1 & dot8)                         │
-│    Utilizes 8 simultaneous vector accumulators (v0..v7) to saturate dual FMA pipelines │
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ 4. In-Register Polynomial SiLU Vectorization                                           │
-│    IEEE-754 exponent bit-manipulation range-reduction with degree-5 polynomial exp    │
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ 5. In-Register SwiGLU Kernel Fusion                                                    │
-│    Fuses Gate, Up, SiLU, and Hadamard operations directly into vector registers        │
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ 6. Hardware INT8 Matrix Quantization (vdotq_s32)                                       │
-│    Per-channel weight & per-tensor activation scaling with <0.6% NRMSE fidelity        │
-├────────────────────────────────────────────────────────────────────────────────────────┤
-│ 7. Asymmetric Multiprocessing & Work-Stealing (big.LITTLE / Tri-Cluster)               │
-│    Mitigates barrier stalls between fast Prime/Big cores and slow Efficiency cores     │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
+| Level | Technique | What It Does |
+| :---: | :--- | :--- |
+| L0 | Naive GEMM | Baseline triple-loop reference |
+| L1 | Cache-Tiled GEMM | Offline weight transposition ($B^T$) + 3D loop blocking for L1/L2 cache locality |
+| L2 | NEON SIMD Microkernel | 8-wide register-blocked FMA (`vfmaq_f32`) with 8 vector accumulators |
+| L3 | Vectorized SiLU | Polynomial approximation with IEEE-754 exponent bit-manipulation |
+| L4 | **Fused SwiGLU FFN** | In-register fusion of Gate + Up + SiLU + Hadamard (>80% DRAM traffic eliminated) |
+| L5 | **INT8 Quantization** | Hardware `vdotq_s32` dot-product instructions with per-channel scaling |
 
 ---
 
-## 📊 Live Empirical Benchmark Results
+## Benchmarks
 
-Benchmarks were gathered on bare-metal hardware at both **Production LLaMA-3 / Mistral-7B Scale** ($M=128, K=4096, N=14336$, total computation $= 15.03\text{ GFLOPs}$) and **Medium Scale** ($M=64, K=2048, N=5632$).
+Tested at **LLaMA-3 / Mistral-7B production scale** ($M=128, K=4096, N=14336$).
 
-### 1. 📱 Qualcomm Snapdragon 8 Gen 2 (Samsung Galaxy Tab S9)
-*1x Cortex-X3 (3.36 GHz) + 4x Cortex-A715/A710 (2.80 GHz) + 3x Cortex-A510 (2.00 GHz), LPDDR5X Memory.*
+### Qualcomm Snapdragon 8 Gen 2 (Galaxy Tab S9)
 
-#### A. Production LLaMA-3 / Mistral-7B Layer Scale ($M=128, K=4096, N=14336$)
-*Tested on Performance Cluster (Cores 3–7: Cortex-X3 + Cortex-A715/A710):*
+| Kernel | Latency | Throughput | Speedup |
+| :--- | :---: | :---: | :---: |
+| Naive GEMM | 68,617 ms | 0.22 GFLOP/s | 1× |
+| Cache-Tiled | 5,112 ms | 2.94 GFLOP/s | 13.4× |
+| NEON FP32 (8×1) | 812 ms | 18.50 GFLOP/s | 84.5× |
+| **INT8 (`vdotq_s32`)** | **360 ms** | **41.74 GFLOP/s** | **190.5×** |
+| Fused SwiGLU FFN | **1,691 ms** | **26.67 GFLOP/s** | 1.43× vs Unfused |
 
-| Optimization Level / Kernel | Execution Latency | Compute Throughput | Numerical Error (NRMSE) | Speedup vs Baseline |
-| :--- | :---: | :---: | :---: | :---: |
-| **L0: Naive GEMM ($i\text{-}j\text{-}k$)** | 68,617.27 ms | 0.22 GFLOP/s | Reference (FP32 Ground Truth) | $1.0\times$ |
-| **L1: Cache-Tiled ($B^T$)** | 5,112.13 ms | 2.94 GFLOP/s | $\text{NRMSE}=1.19\times 10^{-6}$ | **$13.42\times$** |
-| **L2: NEON FP32 ($8\times 1$)** | 812.37 ms | 18.50 GFLOP/s | $\text{NRMSE}=1.16\times 10^{-6}$ | **$84.47\times$** |
-| **L5: INT8 (`vdotq_s32` Hardware SIMD)** | **360.15 ms** | **41.74 GFLOP/s** | $\text{NRMSE}=0.56\%$ | **$190.52\times$** ($2.26\times$ vs FP32) |
-| **Full FFN: Unfused (3x NEON + DRAM $h$)** | 2,424.17 ms | 18.60 GFLOP/s | Reference | $6.81\times$ |
-| **Full FFN: Fused NEON (`dynamic`)** | **1,691.16 ms** | **26.67 GFLOP/s** | $\text{NRMSE}=1.40\times 10^{-6}$ | **$9.76\times$ vs Naive ($1.43\times$ vs Unfused)** |
+**Cluster scheduling:** Pinning threads to the Performance Cluster (Cortex-X3 + A715/A710) and excluding A510 efficiency cores yields a **2.08× latency reduction** over naive 8-core static scheduling by eliminating OpenMP barrier stalls.
 
-#### B. Asymmetric Multiprocessing & Work-Stealing Analysis ($M=64, K=2048, N=5632$)
-| Core Selection / Schedule | Latency | Throughput | Scheduling Behavior & Microarchitectural Reason |
-| :--- | :---: | :---: | :--- |
-| **All 8 Cores (Static OpenMP)** | 336.44 ms | 13.16 GFLOP/s | **Barrier Stalls:** Equal chunks on slow A510 cores leave fast X3/A715 cores idle. |
-| **All 8 Cores (Dynamic OpenMP)** | 224.52 ms | 19.73 GFLOP/s | **Work Stealing ($1.50\times$ faster):** Fast cores continuously pull chunks from task queue. |
-| **Performance Cluster (Cores 3–7)** | **161.58 ms** | **27.41 GFLOP/s** | **$2.08\times$ vs 8-Core Static:** Excluding A510 efficiency cores eliminates tail latency completely. |
+### Apple Silicon M1 (MacBook Air)
 
----
+| Kernel | Latency | Throughput | Speedup |
+| :--- | :---: | :---: | :---: |
+| Naive GEMM | 27,504 ms | 0.55 GFLOP/s | 1× |
+| Cache-Tiled | 5,199 ms | 2.89 GFLOP/s | 5.3× |
+| NEON FP32 (8×1) | 742 ms | 20.27 GFLOP/s | 37.1× |
+| **INT8 (`vdotq_s32`)** | **378 ms** | **39.74 GFLOP/s** | **72.7×** |
+| Fused SwiGLU FFN (4 P-Cores) | **1,354 ms** | **33.31 GFLOP/s** | 1.48× vs Unfused |
+| *Apple Accelerate (AMX)* | *28 ms* | *529.65 GFLOP/s* | *969× (dedicated HW)* |
 
-### 2. 🍎 Apple Silicon M1 (MacBook Air)
-*4x Firestorm Performance Cores (3.20 GHz) + 4x Icestorm Efficiency Cores (2.06 GHz), Unified LPDDR4X Memory.*
+**Thread scaling:** Running on 4 Firestorm P-cores only outperforms all 8 cores (4P+4E) by 1.45× — adding Icestorm E-cores introduces barrier synchronization overhead that exceeds their compute contribution.
 
-#### A. Production LLaMA-3 / Mistral-7B Layer Scale ($M=128, K=4096, N=14336$)
-
-| Optimization Level / Kernel | Execution Latency | Compute Throughput | Numerical Error (NRMSE) | Speedup vs Baseline |
-| :--- | :---: | :---: | :---: | :---: |
-| **L0: Naive GEMM ($i\text{-}j\text{-}k$)** | 27,503.54 ms | 0.55 GFLOP/s | Reference (FP32 Ground Truth) | $1.0\times$ |
-| **L1: Cache-Tiled ($B^T$)** | 5,199.43 ms | 2.89 GFLOP/s | $\text{NRMSE}=1.19\times 10^{-6}$ | **$5.29\times$** |
-| **L2: NEON FP32 ($8\times 1$)** | 741.75 ms | 20.27 GFLOP/s | $\text{NRMSE}=1.16\times 10^{-6}$ | **$37.08\times$** |
-| **L5: INT8 (`vdotq_s32` Hardware SIMD)** | **378.29 ms** | **39.74 GFLOP/s** | $\text{NRMSE}=0.56\%$ | **$72.71\times$** ($1.96\times$ vs FP32) |
-| *Ref: Apple Accelerate (`cblas_sgemm`)* | 28.38 ms | 529.65 GFLOP/s | Reference | $969.06\times$ (Dedicated AMX Co-processor) |
-
-#### B. Thread Scaling & Heterogeneous Workload Sweep ($M=128, K=4096, N=14336$)
-| Thread Configuration | Latency | Throughput | Microarchitectural Observation |
-| :--- | :---: | :---: | :--- |
-| **All 8 Cores (Static OpenMP)** | 1,965.68 ms | 22.94 GFLOP/s | Stalls at OpenMP barrier waiting on 4 Icestorm E-cores. |
-| **All 8 Cores (Dynamic OpenMP)** | 1,654.62 ms | 27.26 GFLOP/s | Dynamic work-stealing improves load balancing across P/E split ($1.19\times$ speedup). |
-| **4 P-Cores Only (`OMP_NUM_THREADS=4`)** | **1,353.84 ms** | **33.31 GFLOP/s** | **$16.47\times$ vs Naive ($1.48\times$ vs Unfused):** Peak CPU performance on Firestorm P-cores. |
-| *Ref: Unfused (3x Accelerate + DRAM)* | 91.09 ms | 495.10 GFLOP/s | Dedicated AMX baseline with DRAM activation traffic. |
+> **Numerical fidelity:** All optimized kernels maintain NRMSE < 0.6% against FP32 ground truth. INT8 quantization uses per-channel weight scaling.
 
 ---
 
-## 🔬 Systems & Microarchitectural Deep-Dive
+## How It Works
 
-### 1. The Stride-$N$ Memory Wall & Offline Weight Transposition ($B^T$)
-In standard row-major GEMM ($C = A \cdot B$), accessing matrix $B [K, N]$ along columns induces a memory stride of $N \times 4\text{ bytes}$. When $N > 16$ (e.g., $N=14,336$ in LLaMA-3), every inner loop iteration accesses a separate 64-byte cache line, causing a $100\%$ cache line miss rate. 
-VectorFFN pre-transposes weights offline ($B^T [N, K]$), aligning both input activations and weights into contiguous row-major streams. This allows dual 128-bit vector loads (`vld1q_f32`) with unit stride directly into L1D cache.
+**1. Weight Transposition ($B^T$):** Pre-transposes weight matrices offline so both operands stream contiguously through L1 cache via unit-stride `vld1q_f32` loads.
 
-### 2. 3D Cache-Blocked Tiling ($M_T, N_T, K_T$)
-To maximize spatial and temporal locality across the cache hierarchy, the matrix loops are blocked into 3 dimensions ($M_T=64, N_T=64, K_T=256$):
-* Active tiles fit within L1D ($64\text{--}128\text{ KB}$) and L2 ($512\text{ KB}\text{--}1\text{ MB}$) caches.
-* Accumulators reside in CPU cache for the duration of the $K$-sweep, reducing DRAM write-backs to **exactly one commit per tile**.
+**2. 3D Cache Blocking:** Tiles the GEMM along M, N, K dimensions to keep working sets in L1/L2. Accumulators commit to DRAM only once per full K-sweep.
 
-### 3. $8\times 1$ Register-Blocked NEON Microkernel
-The inner compute engine unrolls 8 rows of $B^T$ against 1 row of $A$ simultaneously using 8 NEON 128-bit vector accumulators (`v0`..`v7`):
-* **Register File Allocation:** 8 accumulators + 1 shared $A$ vector + 8 $B^T$ vectors = 17 live vector registers (within ARM64's 32-register `v0`..`v31` file, avoiding stack spilling).
-* **Arithmetic Intensity:** Delivers **8 FMAs per $A$-row load**, maximizing instruction-level parallelism (ILP) on wide out-of-order execution pipelines (Cortex-X3 / Firestorm).
+**3. 8×1 Register Microkernel:** Processes 8 rows of $B^T$ against 1 row of $A$ using 8 NEON vector accumulators (17 of 32 available `v` registers), delivering 8 FMAs per A-row load.
 
-### 4. Zero-DRAM Operator Fusion
-Standard ML runtimes materialize full intermediate $[M, d_{\text{ff}}]$ matrices for $\text{Gate}(x)$ and $\text{Up}(x)$ into DRAM. VectorFFN fuses this pipeline directly within CPU vector registers:
-$$\text{Vector } x \xrightarrow{\text{Reg Load}} \text{Compute } \left[\text{Gate}_4, \text{Up}_4\right] \xrightarrow{\text{In-Register SiLU}} \text{Hadamard } (\odot) \xrightarrow{\text{Reg Store}} h_4$$
-This cuts intermediate activation DRAM traffic by **$>80\%$**, transforming a memory-bound decode phase into a compute-bound operation.
+**4. In-Register Fusion:** Gate and Up dot-products, polynomial SiLU activation, and Hadamard product all execute within the vector register file — intermediate activations never touch DRAM.
 
-### 5. Metric Rigor: Why NRMSE vs. Max Relative Error
-Max relative error ($\max \frac{|y - \hat{y}|}{|y|}$) is mathematically unstable on GEMM outputs because near-zero values at the numerical noise floor artificially inflate error ratios to thousands of percent. We validate precision using **Normalized Root-Mean-Square Error (NRMSE)**:
-$$\text{NRMSE} = \frac{\sqrt{\frac{1}{N}\sum_{i=1}^N (y_i - \hat{y}_i)^2}}{\sqrt{\frac{1}{N}\sum_{i=1}^N y_i^2}}$$
-VectorFFN’s INT8 kernel achieves **$<0.6\%$ NRMSE**, proving zero perceptual loss for production LLM weights.
+**5. Asymmetric Core Scheduling:** On heterogeneous big.LITTLE CPUs, pins OpenMP threads to the performance cluster via `sched_setaffinity` to eliminate barrier tail latency from slow efficiency cores.
 
 ---
 
-## 🛠️ Build & Quick-Start Guide
+## Build
 
-### 1. macOS (Apple Silicon M1/M2/M3/M4)
+### macOS (Apple Silicon)
 ```bash
 brew install cmake libomp
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j
-
-# Run full LLaMA-3 scale benchmark
 ./ffn_bench 128 4096 14336 2
 ```
 
-### 2. Android / Snapdragon (via ADB Cross-Compilation)
+### Android / Snapdragon (Cross-compile via NDK)
 ```bash
-# Cross-compile from Mac using Android NDK
-NDK_COMPILER=$(find /opt/homebrew/share/android-ndk /opt/homebrew/Caskroom/android-ndk -name "aarch64-linux-android*clang++" | grep -E "android(29|30|31|32|33|34)" | head -n 1)
-
-$NDK_COMPILER -O3 -std=c++17 \
-  -march=armv8.5-a+dotprod \
+NDK_CC=$(find /opt/homebrew/Caskroom/android-ndk -name "aarch64-linux-android*clang++" | head -1)
+$NDK_CC -O3 -std=c++17 -march=armv8.5-a+dotprod \
   -fopenmp -static-openmp -static-libstdc++ \
-  -Iinclude src/*.cpp -o build/ffn_bench_sd8g2
+  -Iinclude src/*.cpp -o ffn_bench_android
 
-# Push & Run on Android device
-adb push build/ffn_bench_sd8g2 /data/local/tmp/
-adb shell "chmod +x /data/local/tmp/ffn_bench_sd8g2 && /data/local/tmp/ffn_bench_sd8g2 128 4096 14336 2 perf"
+adb push ffn_bench_android /data/local/tmp/
+adb shell "/data/local/tmp/ffn_bench_android 128 4096 14336 2 perf"
 ```
 
-### 3. Android / Snapdragon (Natively inside Termux)
+### Android (Termux, on-device)
 ```bash
-termux-setup-storage
-pkg update && pkg install -y clang cmake libomp openblas git
-cp -r /sdcard/Download/ffn_engine ~/VectorFFN && cd ~/VectorFFN
-
+pkg install clang cmake libomp openblas
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DFFN_FORCE_ARM_MARCH=armv8.5-a+dotprod
 cmake --build . -j
@@ -185,45 +113,23 @@ cmake --build . -j
 
 ---
 
-## 📈 Key Results Summary
-
-| Metric | Snapdragon 8 Gen 2 | Apple M1 |
-| :--- | :---: | :---: |
-| **Peak GEMM Speedup (INT8 vs Naive)** | $190.5\times$ | $72.7\times$ |
-| **INT8 Throughput** | 41.74 GFLOP/s | 39.74 GFLOP/s |
-| **Fused FFN Speedup (vs Naive)** | $9.76\times$ | $16.47\times$ |
-| **Fusion Latency Reduction (vs Unfused)** | $1.43\times$ | $1.48\times$ |
-| **Cluster Affinity Gain (vs Naive Static)** | $2.08\times$ | $1.45\times$ |
-| **INT8 Quantization Error (NRMSE)** | $<0.6\%$ | $<0.6\%$ |
-
----
-
-## 📂 Repository Structure
+## Repository Structure
 
 ```
 VectorFFN/
-├── CMakeLists.txt         # Universal build system (ISA detection, OpenMP, BLAS backends)
+├── CMakeLists.txt          # Build config (ISA detection, OpenMP, BLAS backends)
 ├── include/
-│   ├── common.h           # 64B cache-aligned buffer, Timer, NRMSE validator
-│   ├── gemm_naive.h       # L0: Naive scalar GEMM baseline
-│   ├── gemm_tiled.h       # L1: Cache-tiled 3D loop blocking
-│   ├── gemm_neon.h        # L2: 8-wide & 4-wide NEON register microkernels
-│   ├── silu.h             # L3: Vectorized polynomial SiLU (exp range reduction)
-│   ├── fused_ffn.h        # L4: Multithreaded in-register fused SwiGLU pipeline
-│   └── quantize.h         # L5: INT8 per-channel quantization & vdotq_s32 GEMM
-├── src/
-│   ├── benchmark_main.cpp # Unified test harness with CPU affinity & BLAS baselines
-│   ├── gemm_naive.cpp
-│   ├── gemm_tiled.cpp
-│   ├── gemm_neon.cpp
-│   ├── silu.cpp
-│   ├── fused_ffn.cpp
-│   └── quantize.cpp
-├── LICENSE                # MIT License
+│   ├── common.h            # Aligned buffers, timer, NRMSE validator
+│   ├── gemm_naive.h        # L0: Scalar baseline
+│   ├── gemm_tiled.h        # L1: Cache-tiled GEMM
+│   ├── gemm_neon.h         # L2: NEON SIMD microkernels
+│   ├── silu.h              # L3: Vectorized SiLU
+│   ├── fused_ffn.h         # L4: Fused SwiGLU pipeline
+│   └── quantize.h          # L5: INT8 quantized GEMM
+├── src/                    # Implementations + benchmark harness
+├── LICENSE
 └── README.md
 ```
 
----
-
-## 📜 License
-Released under the [MIT License](LICENSE).
+## License
+[MIT](LICENSE)
